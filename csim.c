@@ -7,15 +7,16 @@
  *
  */
 void usage() {
-    printf("Usage: ./csim -s <num> -E <num> -b <num> -t <file>\n");
+    printf("Usage: ./csim -s <num> -E <num> -b <num> -w <num> -t <file>\n");
     printf("Options:\n");
     printf("  -s <num>   Number of set index bits.\n");
     printf("  -E <num>   Number of lines per set.\n");
     printf("  -b <num>   Number of block offset bits.\n");
+    printf("  -w <num>   0 or 1 for different write-back strategy.\n");
     printf("  -t <file>  Trace file.\n");
     printf("\n");
     printf("Examples:\n");
-    printf("  linux>  ./csim -s 4 -E 1 -b 4 -t traces/yi.trace\n");
+    printf("  linux>  ./csim -s 4 -E 1 -b 4 -w 0 -t traces/yi.trace\n");
 }
 
 /**
@@ -23,9 +24,9 @@ void usage() {
  *
  * @return int 0 means parsed successfully
  */
-int parse_cmd(int args, char **argv, int *s, int *E, int *b, char *filename) {
-    int flag[4] = {0};
-    int flag_num = 4;
+int parse_cmd(int args, char **argv, int *s, int *E, int *b, int *w, char *filename) {
+    int flag[5] = {0};
+    int flag_num = 5;
 
     for (int i = 0; i < args; i++) {
         char *str = argv[i];
@@ -46,6 +47,10 @@ int parse_cmd(int args, char **argv, int *s, int *E, int *b, char *filename) {
                 i++;
                 sscanf(argv[i], "%s", filename);
                 flag[3] = 1;
+            } else if (str[1] == 'w' && i < args) {
+                i++;
+                sscanf(argv[i], "%d", w);
+                flag[4] = 1;
             }
         }
     }
@@ -63,8 +68,8 @@ int parse_cmd(int args, char **argv, int *s, int *E, int *b, char *filename) {
  * @brief Print the final string.
  *
  */
-void printSummary(int hits, int misses, int evictions) {
-    printf("hits:%d misses:%d evictions:%d\n", hits, misses, evictions);
+void printSummary(int hits, int misses, int evictions, int time) {
+    printf("hits:%d misses:%d evictions:%d time:%d\n", hits, misses, evictions, time);
 }
 
 /**
@@ -88,6 +93,7 @@ int readline(FILE *trace, char *op, unsigned long long *address, int *request_le
 // Cache行结构
 typedef struct {
     int valid;              // 有效位
+    int dirty;
     unsigned long long tag; // 标记位
     int lru_counter;        // LRU计数器
 } cache_line_t;
@@ -107,15 +113,15 @@ typedef struct {
 
 // 全局变量
 cache_t cache;
-int hits = 0, misses = 0, evictions = 0;
+int hits = 0, misses = 0, evictions = 0, time = 0;
 int lru_time = 0;  // 全局时间戳，用于LRU
-
+int write_mode;
 // 初始化cache
-void init_cache(int s, int E, int b) {
+void init_cache(int s, int E, int b, int w) {
     cache.S = 1 << s;  // 2^s
     cache.E = E;
     cache.B = 1 << b;  // 2^b
-    
+    write_mode = w;
     // 分配组数组
     cache.sets = (cache_set_t*)malloc(cache.S * sizeof(cache_set_t));
     
@@ -125,6 +131,7 @@ void init_cache(int s, int E, int b) {
         // 初始化每行
         for (int j = 0; j < E; j++) {
             cache.sets[i].lines[j].valid = 0;
+            cache.sets[i].lines[j].dirty = 0;
             cache.sets[i].lines[j].tag = 0;
             cache.sets[i].lines[j].lru_counter = 0;
         }
@@ -140,7 +147,7 @@ void free_cache() {
 }
 
 // 访问cache
-void access_cache(unsigned long long address, int s, int b) {
+void access_cache(unsigned long long address, int s, int b, int write) {
     // 提取标记位和组索引
     unsigned long long tag = address >> (s + b);
     unsigned long long set_index = (address >> b) & ((1 << s) - 1);
@@ -153,20 +160,64 @@ void access_cache(unsigned long long address, int s, int b) {
             // 命中
             hits++;
             set->lines[i].lru_counter = lru_time++;
+
+            // 命中时的时间计算
+            if (write) {
+                if (write_mode == 0) {
+                    // 写回策略：命中时只需要写Cache
+                    time += 5;
+                    set->lines[i].dirty = 1;
+                    // printf("写回策略命中，写入Cache +5\n");
+                } else {
+                    // 写直达策略：需要同时写Cache和内存
+                    time += 55;
+                    // printf("写直达策略命中，写入Cache和内存 +55\n");
+                }
+            } else {
+                // 读操作：命中时从Cache读取
+                time += 5;
+                // printf("读Cache命中 +5\n");
+            }
+            // printf("------\n");
             return;
         }
     }
     
     // 未命中
     misses++;
-    
+    // 未命中时的时间计算(写分配策略)
+    if (write) {
+        if (write_mode == 0) {
+            // 写回策略：未命中时需要先从内存加载到Cache，然后写Cache
+            time += 50 + 5;  // 从内存读取 + 写Cache
+            // printf("写回策略未命中，从内存读取+写Cache +55\n");
+        } else {
+            // 写直达策略：写缺失时，将数据依次写入到主存以及cache中。
+            time += 50 + 5;
+            // printf("写直达策略未命中，从内存读取+写Cache +55\n");
+        }
+    } else {
+        // 读操作：未命中时需要从内存加载到Cache，然后从Cache读取
+        time += 50 + 5;
+        // printf("读操作未命中，从内存加载+读Cache +55\n");
+    }
+
+    // // 如果是写直达且写操作，不需要加载数据到Cache
+    // if (write_mode == 1 && write == 1) {
+    //     printf("写直达策略，不加载到Cache\n");
+    //     printf("------\n");
+    //     return;
+    // }
+
     // 查找空行
     for (int i = 0; i < cache.E; i++) {
         if (!set->lines[i].valid) {
             // 找到空行，直接放入
             set->lines[i].valid = 1;
             set->lines[i].tag = tag;
+            set->lines[i].dirty = 0;
             set->lines[i].lru_counter = lru_time++;
+            // printf("------\n");
             return;
         }
     }
@@ -181,19 +232,25 @@ void access_cache(unsigned long long address, int s, int b) {
             lru_index = i;
         }
     }
-    
+    if (set->lines[lru_index].dirty == 1 && write_mode == 0) {
+        // 脏位为1且采用写回策略
+        time += 50;
+        // printf("替换脏行，写回内存 +50\n");
+    }
     // 替换LRU行
+    set->lines[lru_index].dirty = 0;
     set->lines[lru_index].tag = tag;
     set->lines[lru_index].lru_counter = lru_time++;
+    // printf("------\n");
 }
 #pragma endregion
 
 int main(int args, char **argv) {
 
 #pragma region Parse
-    int s, E, b;
+    int s, E, b, w;
     char filename[1024];
-    if (parse_cmd(args, argv, &s, &E, &b, filename) != 0) {
+    if (parse_cmd(args, argv, &s, &E, &b, &w, filename) != 0) {
         return 0;
     }
 #pragma endregion
@@ -202,7 +259,7 @@ int main(int args, char **argv) {
 
     // [2/4] Your code for initialzing your cache
     // You can use variables s, E and b directly.
-    init_cache(s, E, b);
+    init_cache(s, E, b, w);
 #pragma endregion
 
 #pragma region Handle-Trace
@@ -215,12 +272,14 @@ int main(int args, char **argv) {
         // [3/4] Your code for handling the trace line
         switch (op) {
             case 'L':  // Load
+                access_cache(address, s, b, 0);
+                break;
             case 'S':  // Store
-                access_cache(address, s, b);
+                access_cache(address, s, b, 1);
                 break;
             case 'M':  // Modify (Load + Store)
-                access_cache(address, s, b);  // Load
-                access_cache(address, s, b);  // Store
+                access_cache(address, s, b, 0);  // Load
+                access_cache(address, s, b, 1);  // Store
                 break;
             case 'I':  // Instruction fetch (ignore)
                 break;
@@ -230,7 +289,7 @@ int main(int args, char **argv) {
 #pragma endregion
 
     // [4/4] Your code to output the hits, misses and evictions
-    printSummary(hits, misses, evictions);
+    printSummary(hits, misses, evictions, time);
 
     // Maybe you can 'free' your cache here
     free_cache();

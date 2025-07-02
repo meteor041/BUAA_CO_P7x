@@ -106,54 +106,49 @@ typedef struct {
 } cache_t;
 
 // 全局变量
-cache_t data_cache;     // 数据缓存
-cache_t inst_cache;     // 指令缓存
+cache_t cache;
 int hits = 0, misses = 0, evictions = 0;
 int lru_time = 0;  // 全局时间戳，用于LRU
 
-// 最近访问的指令地址（用于顺序预测）
-unsigned long long recent_inst_addrs[3] = {0};
-int recent_count = 0;
-
 // 初始化cache
-void init_cache(cache_t *cache, int s, int E, int b) {
-    cache->S = 1 << s;  // 2^s
-    cache->E = E;
-    cache->B = 1 << b;  // 2^b
+void init_cache(int s, int E, int b) {
+    cache.S = 1 << s;  // 2^s
+    cache.E = E;
+    cache.B = 1 << b;  // 2^b
     
     // 分配组数组
-    cache->sets = (cache_set_t*)malloc(cache->S * sizeof(cache_set_t));
+    cache.sets = (cache_set_t*)malloc(cache.S * sizeof(cache_set_t));
     
     // 为每组分配行数组
-    for (int i = 0; i < cache->S; i++) {
-        cache->sets[i].lines = (cache_line_t*)malloc(E * sizeof(cache_line_t));
+    for (int i = 0; i < cache.S; i++) {
+        cache.sets[i].lines = (cache_line_t*)malloc(E * sizeof(cache_line_t));
         // 初始化每行
         for (int j = 0; j < E; j++) {
-            cache->sets[i].lines[j].valid = 0;
-            cache->sets[i].lines[j].tag = 0;
-            cache->sets[i].lines[j].lru_counter = 0;
+            cache.sets[i].lines[j].valid = 0;
+            cache.sets[i].lines[j].tag = 0;
+            cache.sets[i].lines[j].lru_counter = 0;
         }
     }
 }
 
 // 释放cache内存
-void free_cache(cache_t *cache) {
-    for (int i = 0; i < cache->S; i++) {
-        free(cache->sets[i].lines);
+void free_cache() {
+    for (int i = 0; i < cache.S; i++) {
+        free(cache.sets[i].lines);
     }
-    free(cache->sets);
+    free(cache.sets);
 }
 
 // 访问cache
-void access_cache(cache_t *cache, unsigned long long address, int s, int b, int count_stats) {
+void access_cache(unsigned long long address, int s, int b) {
     // 提取标记位和组索引
     unsigned long long tag = address >> (s + b);
     unsigned long long set_index = (address >> b) & ((1 << s) - 1);
     
-    cache_set_t *set = &cache->sets[set_index];
+    cache_set_t *set = &cache.sets[set_index];
     
     // 查找是否命中
-    for (int i = 0; i < cache->E; i++) {
+    for (int i = 0; i < cache.E; i++) {
         if (set->lines[i].valid && set->lines[i].tag == tag) {
             // 命中
             hits++;
@@ -163,10 +158,10 @@ void access_cache(cache_t *cache, unsigned long long address, int s, int b, int 
     }
     
     // 未命中
-    if (count_stats) misses++;
+    misses++;
     
     // 查找空行
-    for (int i = 0; i < cache->E; i++) {
+    for (int i = 0; i < cache.E; i++) {
         if (!set->lines[i].valid) {
             // 找到空行，直接放入
             set->lines[i].valid = 1;
@@ -177,11 +172,11 @@ void access_cache(cache_t *cache, unsigned long long address, int s, int b, int 
     }
     
     // 没有空行，需要替换（LRU）
-    if (count_stats) evictions++;
+    evictions++;
     
     // 找到LRU行（lru_counter最小的）
     int lru_index = 0;
-    for (int i = 1; i < cache->E; i++) {
+    for (int i = 1; i < cache.E; i++) {
         if (set->lines[i].lru_counter < set->lines[lru_index].lru_counter) {
             lru_index = i;
         }
@@ -190,42 +185,6 @@ void access_cache(cache_t *cache, unsigned long long address, int s, int b, int 
     // 替换LRU行
     set->lines[lru_index].tag = tag;
     set->lines[lru_index].lru_counter = lru_time++;
-}
-// 更新最近访问的指令地址
-void update_recent_inst_addrs(unsigned long long address) {
-    // 左移数组
-    for (int i = 2; i > 0; i--) {
-        recent_inst_addrs[i] = recent_inst_addrs[i-1];
-    }
-    recent_inst_addrs[0] = address;
-    if (recent_count < 3) recent_count++;
-}
-
-// 检查是否需要进行顺序预测
-int should_predict(unsigned long long address) {
-    // 检查是否在缓存行右边界（每个缓存行32字节，4条指令）
-    // 指令地址8字节对齐，所以缓存行内偏移为0,8,16,24
-    // 右边界即偏移为24的位置
-    unsigned long long block_offset = address & 0x1F; // 低5位
-    return (block_offset == 24); // 0x18 = 24
-}
-
-// 检查最近3条指令是否连续递增
-int is_sequential_pattern() {
-    if (recent_count < 3) return 0;
-    
-    // 检查是否连续且递增（每条指令8字节）
-    return (recent_inst_addrs[1] == recent_inst_addrs[0] + 8) &&
-           (recent_inst_addrs[2] == recent_inst_addrs[1] + 8);
-}
-
-// 进行顺序预测
-void sequential_predict(unsigned long long current_addr) {
-    if (should_predict(current_addr) && is_sequential_pattern()) {
-        unsigned long long next_addr = current_addr + 8;
-        // 预测下一条指令，计入统计
-        access_cache(&inst_cache, next_addr, 3, 5, 1);
-    }
 }
 #pragma endregion
 
@@ -243,9 +202,7 @@ int main(int args, char **argv) {
 
     // [2/4] Your code for initialzing your cache
     // You can use variables s, E and b directly.
-    init_cache(&data_cache, s, E, b);
-    // 初始化指令缓存（固定参数：s=3, E=2, b=5）
-    init_cache(&inst_cache, 3, 2, 5);
+    init_cache(s, E, b);
 #pragma endregion
 
 #pragma region Handle-Trace
@@ -254,37 +211,19 @@ int main(int args, char **argv) {
     unsigned long long address;
     int request_length;
 
-    int preload_phase = 1; // 是否在预载阶段
-
     while (readline(trace, &op, &address, &request_length) != -1) {
         // [3/4] Your code for handling the trace line
-        if (op == 'P') {
-            // 预载指令，不计入统计
-            access_cache(&inst_cache, address, 3, 5, 0);
-            update_recent_inst_addrs(address);
-        } else {
-            // 结束预载阶段
-            if (preload_phase) {
-                preload_phase = 0;
-                // 重置最近访问记录
-                recent_count = 0;
-            }
-            switch (op) {
-                case 'L':  // Load
-                case 'S':  // Store
-                    access_cache(&data_cache, address, s, b, 1);
-                    break;
-                case 'M':  // Modify (Load + Store)
-                    access_cache(&data_cache, address, s, b, 1);  // Load
-                    access_cache(&data_cache, address, s, b, 1);  // Store
-                    break;
-                case 'I':  // Instruction fetch
-                    access_cache(&inst_cache, address, 3, 5, 1);
-                    update_recent_inst_addrs(address);
-                    // 进行顺序预测
-                    sequential_predict(address);
-                    break;
-            }
+        switch (op) {
+            case 'L':  // Load
+            case 'S':  // Store
+                access_cache(address, s, b);
+                break;
+            case 'M':  // Modify (Load + Store)
+                access_cache(address, s, b);  // Load
+                access_cache(address, s, b);  // Store
+                break;
+            case 'I':  // Instruction fetch (ignore)
+                break;
         }
     }
 
@@ -294,7 +233,6 @@ int main(int args, char **argv) {
     printSummary(hits, misses, evictions);
 
     // Maybe you can 'free' your cache here
-    free_cache(&data_cache);
-    free_cache(&inst_cache);
+    free_cache();
     return 0;
 }

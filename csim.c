@@ -145,7 +145,7 @@ void free_cache(cache_t *cache) {
 }
 
 // 访问cache
-void access_cache(cache_t *cache, unsigned long long address, int s, int b, int count_stats) {
+int access_cache(cache_t *cache, unsigned long long address, int s, int b, int count_stats) {
     // 提取标记位和组索引
     unsigned long long tag = address >> (s + b);
     unsigned long long set_index = (address >> b) & ((1 << s) - 1);
@@ -156,9 +156,9 @@ void access_cache(cache_t *cache, unsigned long long address, int s, int b, int 
     for (int i = 0; i < cache->E; i++) {
         if (set->lines[i].valid && set->lines[i].tag == tag) {
             // 命中
-            hits++;
+            if (count_stats) hits++;
             set->lines[i].lru_counter = lru_time++;
-            return;
+            return 1;
         }
     }
     
@@ -172,7 +172,7 @@ void access_cache(cache_t *cache, unsigned long long address, int s, int b, int 
             set->lines[i].valid = 1;
             set->lines[i].tag = tag;
             set->lines[i].lru_counter = lru_time++;
-            return;
+            return 0; // 未命中但无需替换
         }
     }
     
@@ -190,6 +190,7 @@ void access_cache(cache_t *cache, unsigned long long address, int s, int b, int 
     // 替换LRU行
     set->lines[lru_index].tag = tag;
     set->lines[lru_index].lru_counter = lru_time++;
+    return 0; // 未命中且已替换
 }
 // 更新最近访问的指令地址
 void update_recent_inst_addrs(unsigned long long address) {
@@ -215,8 +216,8 @@ int is_sequential_pattern() {
     if (recent_count < 3) return 0;
     
     // 检查是否连续且递增（每条指令8字节）
-    return (recent_inst_addrs[1] == recent_inst_addrs[0] + 8) &&
-           (recent_inst_addrs[2] == recent_inst_addrs[1] + 8);
+    return (recent_inst_addrs[1] + 8 == recent_inst_addrs[0]) &&
+           (recent_inst_addrs[2] + 8 == recent_inst_addrs[1]);
 }
 
 // 进行顺序预测
